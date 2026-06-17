@@ -5,14 +5,14 @@
  * fonctions exportées, mêmes signatures, mêmes formes de retour) pour que
  * `api/sessions.js` n'ait absolument RIEN à changer. En interne, on délègue
  * la logique pédagogique au microservice Python via HTTP synchrone (curl),
- * et on enveloppe tout dans un fallback gracieux en cas d'indisponibilité.
+ * et on enveloppe tout dans un fallback local agentique en cas d'indisponibilité.
  *
  * Variable d'environnement : LANGGRAPH_SERVICE_URL (ex: http://localhost:8000)
  */
 const { execFileSync } = require('child_process');
 
 const SERVICE_URL = process.env.LANGGRAPH_SERVICE_URL || 'http://localhost:8000';
-const HTTP_TIMEOUT_MS = 30000;
+const HTTP_TIMEOUT_MS = Number(process.env.LANGGRAPH_TIMEOUT_MS || 4000);
 
 // ---------------------------------------------------------------------------
 // Utilitaires texte (conservés pour `detectConceptsCovered`)
@@ -65,6 +65,16 @@ const NODE_TEMPLATES = {
   ]
 };
 
+const NODE_KEYWORDS = {
+  base_case: ['cas de base', 'condition arret', 'condition stop', 'fin recursion'],
+  recursive_call: ['appel recursif', 's appelle elle meme', 'appelle elle meme', 'appel a soi meme'],
+  shrink: ['plus petit', 'sous probleme', 'reduit', 'decremente', 'n moins 1'],
+  call_stack: ['pile appels', 'pile d appels', 'stack', 'memoire', 'empile'],
+  combine: ['remonte', 'combine', 'retourne', 'resultat precedent'],
+  termination: ['terminaison', 's arrete', 'infini', 'boucle infinie'],
+  vs_loop: ['boucle', 'iteration', 'iteratif']
+};
+
 /** Construit un student_model initial pour un sujet donné. */
 function buildInitialStudentModel(topic) {
   const template = NODE_TEMPLATES[topic.id];
@@ -78,6 +88,111 @@ function buildInitialStudentModel(topic) {
     status: 'not_addressed',
     note: ''
   }));
+}
+
+function getNodeText(node) {
+  const keywords = NODE_KEYWORDS[node.node] || [];
+  return normalize(`${node.label || ''} ${node.node || ''} ${keywords.join(' ')}`);
+}
+
+function scoreNodeFromText(node, normalizedText) {
+  const terms = getNodeText(node).split(/\s+/).filter((term) => term.length >= 4);
+  return terms.filter((term) => normalizedText.includes(term)).length;
+}
+
+function updateModelLocally(topic, session, lastUserMessage) {
+  const normalized = normalize(lastUserMessage.content);
+  const previousTarget = session.lastTargetedNode;
+
+  session.studentModel = session.studentModel.map((node) => {
+    const score = scoreNodeFromText(node, normalized);
+    const wasTargeted = previousTarget && node.node === previousTarget;
+    const hasMechanism = /(car|parce|donc|permet|evite|assure|garantit|fonctionne|appelle|retourne|jusqu|quand|si)/.test(normalized);
+    const hasExample = /(exemple|factorielle|fibonacci|imagine|comme|par exemple|\d+)/.test(normalized);
+
+    if (score === 0 && !wasTargeted) return node;
+
+    if (score > 0 && (hasMechanism || hasExample || lastUserMessage.content.length > 140)) {
+      return {
+        ...node,
+        status: 'clear',
+        note: `Le tuteur a expliqué « ${node.label} » avec ${hasExample ? 'un exemple' : 'un mécanisme'}.`
+      };
+    }
+
+    if (score > 0 || wasTargeted) {
+      return {
+        ...node,
+        status: 'vague',
+        note: `« ${node.label} » est mentionné, mais Léo attend encore le mécanisme ou un exemple.`
+      };
+    }
+
+    return node;
+  });
+
+  if (lastUserMessage.content.trim().length < 35) {
+    session.overallConfusion = (session.overallConfusion || 0) + 8;
+  } else {
+    session.overallConfusion = Math.max(0, (session.overallConfusion || 0) - 2);
+  }
+}
+
+function chooseLocalMove(session) {
+  const model = session.studentModel || [];
+  const vague = model.find((n) => n.status === 'vague' || n.status === 'contradicted');
+  if (vague) return { move: 'deepen', targetedNode: vague };
+
+  const missing = model.find((n) => n.status === 'not_addressed' || n.status === 'avoided');
+  if (missing) return { move: 'pivot', targetedNode: missing };
+
+  const turnCount = session.messages.filter((m) => m.role === 'user').length;
+  if (turnCount >= 2 && model.length > 0) {
+    return { move: 'trap', targetedNode: model[turnCount % model.length] };
+  }
+
+  return { move: 'conclude', targetedNode: model[0] || { node: '', label: 'le sujet' } };
+}
+
+function localReaction(topic, move, targetedNode) {
+  const label = targetedNode.label || targetedNode.node || topic.label;
+  if (move === 'pivot') {
+    return `Attends, il me manque encore « ${label} ». Ça joue quel rôle exactement dans ${topic.label} ?`;
+  }
+  if (move === 'trap') {
+    return `Donc si je reformule, « ${label} » est juste un détail optionnel et on peut l'ignorer, c'est bien ça ?`;
+  }
+  if (move === 'conclude') {
+    return `Ok, je crois que je tiens l'idée générale de ${topic.label}. Tu peux me donner un dernier exemple rapide pour vérifier que je ne récite pas sans comprendre ?`;
+  }
+  return `Attends, tu as parlé de « ${label} », mais concrètement il se passe quoi étape par étape ?`;
+}
+
+function buildLocalReply(topic, session, lastUserMessage) {
+  updateModelLocally(topic, session, lastUserMessage);
+  const decision = chooseLocalMove(session);
+  session.lastMove = decision.move;
+  session.lastTargetedNode = decision.targetedNode.node;
+  session.agentMode = 'fallback-local';
+  session.confusionCount = lastUserMessage.content.trim().length < 35
+    ? (session.confusionCount || 0) + 1
+    : (session.confusionCount || 0);
+
+  return {
+    type: MOVE_TO_TYPE[decision.move] || 'clarify',
+    content: localReaction(topic, decision.move, decision.targetedNode)
+  };
+}
+
+function buildAgentSnapshot(session) {
+  const model = Array.isArray(session.studentModel) ? session.studentModel : [];
+  return {
+    mode: session.agentMode || 'langgraph',
+    move: session.lastMove || 'initial',
+    targetedNode: session.lastTargetedNode || '',
+    overallConfusion: session.overallConfusion || 0,
+    studentModel: model
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +307,7 @@ function buildStudentReply(topic, session, lastUserMessage) {
       : (session.overallConfusion || 0);
     session.lastMove = data.move;
     session.lastTargetedNode = data.targeted_node;
+    session.agentMode = 'langgraph';
 
     const move = data.move || 'deepen';
     const type = MOVE_TO_TYPE[move] || 'clarify';
@@ -201,14 +317,13 @@ function buildStudentReply(topic, session, lastUserMessage) {
       content: data.reaction || '…'
     };
   } catch (err) {
-    // --- Fallback gracieux : le micro-service est injoignable ---
-    session.confusionCount = (session.confusionCount || 0) + 1;
-    return {
-      type: 'clarify',
-      content:
-        "Léo est momentanément absent (le micro-service pédagogique ne répond pas). "
-        + "Reformule ta dernière idée et je transmettrai dès qu'il revient."
-    };
+    return buildLocalReply(topic, session, lastUserMessage);
+  }
+}
+
+function ensureStudentModel(topic, session) {
+  if (!Array.isArray(session.studentModel) || session.studentModel.length === 0) {
+    session.studentModel = buildInitialStudentModel(topic);
   }
 }
 
@@ -219,9 +334,7 @@ function buildStudentReply(topic, session, lastUserMessage) {
  */
 function buildFinalReport(topic, session) {
   // Initialisation défensive
-  if (!Array.isArray(session.studentModel) || session.studentModel.length === 0) {
-    session.studentModel = buildInitialStudentModel(topic);
-  }
+  ensureStudentModel(topic, session);
 
   let verdict = null;
   try {
@@ -320,7 +433,8 @@ function buildFinalReport(topic, session) {
       userMessages: userMessages.length,
       conceptsCovered: covered.length,
       totalConcepts: topic.concepts.length
-    }
+    },
+    agent: buildAgentSnapshot(session)
   };
 }
 
@@ -328,5 +442,8 @@ module.exports = {
   buildStudentReply,
   buildFinalReport,
   estimateComprehension,
-  detectConceptsCovered
+  detectConceptsCovered,
+  buildInitialStudentModel,
+  buildAgentSnapshot,
+  ensureStudentModel
 };

@@ -19,6 +19,10 @@
     return;
   }
   const r = await res.json();
+  const agent = r.agent || {};
+  const model = agent.studentModel || [];
+  const clearCount = model.filter((n) => n.status === 'clear').length;
+  const target = model.find((n) => n.node === agent.targetedNode);
 
   titleEl.textContent = `Rapport — ${r.topic}`;
   subtitleEl.textContent = `${r.stats.userMessages} explication(s) analysée(s), ${r.stats.conceptsCovered}/${r.stats.totalConcepts} concepts couverts.`;
@@ -38,6 +42,16 @@
     <article class="report-card">
       <h3>Zones d'incertitude détectées</h3>
       ${listOrEmpty(r.uncertainties, (u) => `<li>${u}</li>`)}
+    </article>
+
+    <article class="report-card">
+      <h3>Trace de l'agent</h3>
+      <ul>
+        <li><strong>Mode</strong> — ${agent.mode || 'ready'}</li>
+        <li><strong>Dernière décision</strong> — ${agent.move || 'initial'}</li>
+        <li><strong>Cible pédagogique</strong> — ${target ? target.label : (agent.targetedNode || '—')}</li>
+        <li><strong>Modèle clair</strong> — ${clearCount}/${model.length || 0} nœud(s)</li>
+      </ul>
     </article>
 
     <article class="report-card">

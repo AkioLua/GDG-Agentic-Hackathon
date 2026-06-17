@@ -16,6 +16,10 @@
   const subjectDesc = document.getElementById('subject-desc');
   const progressFill = document.getElementById('progress-fill');
   const progressValue = document.getElementById('progress-value');
+  const agentModeEl = document.getElementById('agent-mode');
+  const agentMoveEl = document.getElementById('agent-move');
+  const agentTargetEl = document.getElementById('agent-target');
+  const studentModelEl = document.getElementById('student-model');
   const conceptsCoveredEl = document.getElementById('concepts-covered');
   const conceptsRemainingEl = document.getElementById('concepts-remaining');
   const endBtn = document.getElementById('end-session-btn');
@@ -45,6 +49,32 @@
   function updateProgress(percent) {
     progressFill.style.width = `${percent}%`;
     progressValue.textContent = `${percent}%`;
+  }
+
+  function getTargetLabel(model, nodeId) {
+    const target = (model || []).find((n) => n.node === nodeId);
+    return target ? target.label : (nodeId || '—');
+  }
+
+  function renderStudentModel(model) {
+    if (!model || model.length === 0) {
+      studentModelEl.innerHTML = '<span class="empty">Modèle en attente.</span>';
+      return;
+    }
+    studentModelEl.innerHTML = model.map((node) => `
+      <div class="model-node ${node.status}">
+        <span>${escapeHtml(node.label)}</span>
+        <strong>${escapeHtml(node.status)}</strong>
+      </div>
+    `).join('');
+  }
+
+  function renderAgent(agent) {
+    const model = agent && agent.studentModel ? agent.studentModel : [];
+    agentModeEl.textContent = agent && agent.mode ? agent.mode : 'ready';
+    agentMoveEl.textContent = agent && agent.move ? agent.move : 'initial';
+    agentTargetEl.textContent = getTargetLabel(model, agent && agent.targetedNode);
+    renderStudentModel(model);
   }
 
   function setTyping(on) {
@@ -80,6 +110,13 @@
     const remaining = topic.concepts.filter((c) => !session.conceptsCovered.includes(c));
     renderChips(conceptsRemainingEl, remaining, 'todo');
     updateProgress(session.comprehension || 0);
+    renderAgent({
+      mode: session.agentMode || 'ready',
+      move: session.lastMove || 'initial',
+      targetedNode: session.lastTargetedNode || '',
+      overallConfusion: session.overallConfusion || 0,
+      studentModel: session.studentModel || []
+    });
   }
 
   async function sendMessage(content) {
@@ -102,6 +139,7 @@
       renderChips(conceptsCoveredEl, data.conceptsCovered, 'done');
       renderChips(conceptsRemainingEl, data.conceptsRemaining, 'todo');
       updateProgress(data.comprehension);
+      renderAgent(data.agent);
     } catch (e) {
       setTyping(false);
       alert("Erreur réseau");

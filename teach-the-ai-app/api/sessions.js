@@ -42,6 +42,11 @@ router.post('/', (req, res) => {
         timestamp: new Date().toISOString()
       }
     ],
+    studentModel: ai.buildInitialStudentModel(topic),
+    agentMode: 'ready',
+    lastMove: 'initial',
+    lastTargetedNode: '',
+    overallConfusion: 0,
     conceptsCovered: [],
     confusionCount: 0,
     finished: false
@@ -56,6 +61,8 @@ router.get('/:id', (req, res) => {
   const session = store.loadSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session introuvable' });
   const topic = topics.find((t) => t.id === session.topicId);
+  ai.ensureStudentModel(topic, session);
+  store.saveSession(session);
   res.json({ session, topic });
 });
 
@@ -68,6 +75,7 @@ router.post('/:id/messages', (req, res) => {
   const session = store.loadSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session introuvable' });
   const topic = topics.find((t) => t.id === session.topicId);
+  ai.ensureStudentModel(topic, session);
 
   const userMessage = {
     role: 'user',
@@ -98,6 +106,7 @@ router.post('/:id/messages', (req, res) => {
   res.json({
     assistantMessage,
     comprehension,
+    agent: ai.buildAgentSnapshot(session),
     conceptsCovered: session.conceptsCovered,
     conceptsRemaining: topic.concepts.filter((c) => !session.conceptsCovered.includes(c))
   });
