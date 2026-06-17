@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Teach the AI — Apprendre en enseignant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand">
+      <span class="brand-mark">T</span>
+      Teach the AI
+    </a>
+    <nav>
+      <a href="https://en.wikipedia.org/wiki/Learning_by_teaching" target="_blank" rel="noopener">Méthode</a>
+      <a href="#topics">Sujets</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <span class="tag">Apprendre en enseignant</span>
+      <h1>Maîtrise un sujet en l'expliquant à une IA.</h1>
+      <p>Choisis un concept, prends le rôle du prof. L'IA joue un élève curieux qui te pose des questions, demande des exemples, et révèle les zones d'ombre de ton explication.</p>
+    </section>
+
+    <section class="topics-section" id="topics">
+      <h2>Choisis un sujet à maîtriser</h2>
+      <div class="topic-grid" id="topic-grid"></div>
+
+      <div class="custom-topic">
+        <input id="custom-topic-input" placeholder="Ou tape ton propre sujet (ex. machine learning, mitochondrie, blockchain...)" />
+        <button class="btn btn-primary" id="custom-topic-btn">Commencer avec ce sujet</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/js/home.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "teach-the-ai-app",
+  "version": "1.0.0",
+  "description": "Plateforme d'apprentissage par l'enseignement : l'utilisateur explique un concept à une IA qui joue le rôle d'un élève curieux.",
+  "main": "server.js",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "nanoid": "^3.3.7"
+  },
+  "license": "MIT"
+}

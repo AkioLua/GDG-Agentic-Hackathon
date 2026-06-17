@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Session — Teach the AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand">
+      <span class="brand-mark">T</span>
+      Teach the AI
+    </a>
+    <div class="row">
+      <button class="btn btn-ghost" id="end-session-btn">Terminer la session</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="chat-layout">
+      <!-- Chat -->
+      <section class="chat-card">
+        <div class="chat-header">
+          <h2 id="chat-title">Session</h2>
+          <span class="topic-pill" id="topic-pill">…</span>
+        </div>
+        <div class="chat-messages" id="chat-messages"></div>
+        <form class="chat-input" id="chat-form">
+          <textarea id="chat-input" placeholder="Explique avec tes propres mots… (Maj+Entrée pour aller à la ligne)" required></textarea>
+          <button type="submit" class="btn btn-primary">Envoyer</button>
+        </form>
+      </section>
+
+      <!-- Sidebar -->
+      <aside class="sidebar-card">
+        <div class="sidebar-section">
+          <h3>Sujet étudié</h3>
+          <div class="subject-name" id="subject-name">—</div>
+          <div class="subject-desc" id="subject-desc"></div>
+        </div>
+        <div class="sidebar-section">
+          <h3>Niveau de compréhension</h3>
+          <div class="progress-label">
+            <span>Estimation</span>
+            <span class="progress-value" id="progress-value">0%</span>
+          </div>
+          <div class="progress-bar"><div id="progress-fill"></div></div>
+        </div>
+        <div class="sidebar-section">
+          <h3>Concepts abordés</h3>
+          <div class="chip-list" id="concepts-covered"><span class="empty">Rien encore. À toi de jouer.</span></div>
+        </div>
+        <div class="sidebar-section">
+          <h3>Notions restant à expliquer</h3>
+          <div class="chip-list" id="concepts-remaining"><span class="empty">…</span></div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script src="/js/chat.js"></script>
+</body>
+</html>
