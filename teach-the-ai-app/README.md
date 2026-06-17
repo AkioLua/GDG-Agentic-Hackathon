@@ -15,6 +15,21 @@ npm start
 ```
 Le serveur écoute sur `http://localhost:3000`.
 
+## Agent LangGraph avec Ollama
+Le microservice Python utilise Ollama en local, sans clé API externe. Par défaut,
+il appelle le modèle `phi3` sur `http://localhost:11434`.
+
+```bash
+ollama pull phi3
+cd langgraph-agent
+cp .env.example .env
+python3 -m pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+Si ton modèle Ollama a un autre nom, change `OLLAMA_MODEL` dans
+`langgraph-agent/.env`.
+
 ## Architecture
 ```
 teach-the-ai-app/

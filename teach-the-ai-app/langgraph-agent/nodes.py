@@ -8,23 +8,21 @@ import os
 import re
 from typing import Any, Dict
 
-from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from state import AgentState
 
 
 # -----------------------------------------------------------------------------
-# Client LLM (compatible API OpenAI : Anthropic via proxy, OpenAI, etc.)
+# Client LLM local via Ollama.
 # -----------------------------------------------------------------------------
-def _client() -> ChatOpenAI:
-    """Instancie un client LLM à partir des variables d'environnement."""
-    return ChatOpenAI(
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-        api_key=os.getenv("LLM_API_KEY", "missing"),
-        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+def _client() -> ChatOllama:
+    """Instancie un client Ollama local à partir des variables d'environnement."""
+    return ChatOllama(
+        base_url=os.getenv("OLLAMA_BASE_URL", os.getenv("LLM_BASE_URL", "http://localhost:11434")),
+        model=os.getenv("OLLAMA_MODEL", os.getenv("LLM_MODEL", "phi3")),
         temperature=0.4,
-        timeout=30,
     )
 
 
