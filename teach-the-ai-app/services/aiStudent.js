@@ -1,15 +1,22 @@
 /**
- * Service "IA élève".
+ * Service "IA élève" — proxy synchrone vers le microservice Python LangGraph.
  *
- * Implémente une heuristique légère (sans dépendance externe) qui simule un
- * élève curieux : il pose des questions de clarification, demande des
- * exemples, reformule, et signale ce qu'il n'a pas compris.
+ * L'interface publique reste IDENTIQUE à la version d'origine (mêmes
+ * fonctions exportées, mêmes signatures, mêmes formes de retour) pour que
+ * `api/sessions.js` n'ait absolument RIEN à changer. En interne, on délègue
+ * la logique pédagogique au microservice Python via HTTP synchrone (curl),
+ * et on enveloppe tout dans un fallback gracieux en cas d'indisponibilité.
  *
- * Si la variable d'environnement OPENAI_API_KEY est définie, on pourrait
- * brancher un vrai LLM ; ici on garde une logique 100% locale pour rester
- * déployable sans configuration.
+ * Variable d'environnement : LANGGRAPH_SERVICE_URL (ex: http://localhost:8000)
  */
-const topics = require('./topics');
+const { execFileSync } = require('child_process');
+
+const SERVICE_URL = process.env.LANGGRAPH_SERVICE_URL || 'http://localhost:8000';
+const HTTP_TIMEOUT_MS = 30000;
+
+// ---------------------------------------------------------------------------
+// Utilitaires texte (conservés pour `detectConceptsCovered`)
+// ---------------------------------------------------------------------------
 
 /** Normalise un texte pour comparaison de mots-clés. */
 function normalize(text = '') {
@@ -33,104 +40,257 @@ function detectConceptsCovered(topic, userText, alreadyCovered) {
   return newlyCovered;
 }
 
+// ---------------------------------------------------------------------------
+// Mapping topic.id -> student_model initial pour le microservice Python
+// ---------------------------------------------------------------------------
+
+/**
+ * Slug ASCII court à partir d'un libellé français.
+ * (utilisé comme fallback pour les sujets sans template explicite)
+ */
+function toSlug(label) {
+  return normalize(label).trim().replace(/\s+/g, '_').slice(0, 32) || 'node';
+}
+
+/** Templates explicites pour les sujets clés (commençant par la récursivité). */
+const NODE_TEMPLATES = {
+  recursion: [
+    { node: 'base_case',     label: "condition d'arrêt" },
+    { node: 'recursive_call',label: "appel à soi-même" },
+    { node: 'shrink',        label: "le problème rétrécit vers le cas de base" },
+    { node: 'call_stack',    label: "où s'empilent les appels" },
+    { node: 'combine',       label: "comment les résultats remontent" },
+    { node: 'termination',   label: "garantie que ça s'arrête" },
+    { node: 'vs_loop',       label: "différence avec une boucle" }
+  ]
+};
+
+/** Construit un student_model initial pour un sujet donné. */
+function buildInitialStudentModel(topic) {
+  const template = NODE_TEMPLATES[topic.id];
+  if (template) {
+    return template.map((n) => ({ ...n, status: 'not_addressed', note: '' }));
+  }
+  // Fallback générique : dériver des concepts listés dans topics.js
+  return topic.concepts.map((c) => ({
+    node: toSlug(c),
+    label: c,
+    status: 'not_addressed',
+    note: ''
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Client HTTP synchrone vers le microservice Python (via curl)
+// ---------------------------------------------------------------------------
+
+/**
+ * Effectue un POST JSON synchrone et renvoie l'objet parsé.
+ * On utilise `curl` via execFileSync pour éviter toute dépendance npm
+ * supplémentaire et préserver la nature synchrone des callers existants.
+ */
+function postJsonSync(path, payload) {
+  const url = `${SERVICE_URL}${path}`;
+  const body = JSON.stringify(payload);
+  const args = [
+    '-sS',
+    '--fail',
+    '--max-time', String(Math.ceil(HTTP_TIMEOUT_MS / 1000)),
+    '-H', 'Content-Type: application/json',
+    '-X', 'POST',
+    '--data-binary', '@-',
+    url
+  ];
+  const stdout = execFileSync('curl', args, {
+    input: body,
+    timeout: HTTP_TIMEOUT_MS + 2000,
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024
+  });
+  return JSON.parse(stdout);
+}
+
+// ---------------------------------------------------------------------------
+// Mapping move -> type (pour rester compatible avec le front existant)
+// ---------------------------------------------------------------------------
+const MOVE_TO_TYPE = {
+  pivot: 'probe',
+  deepen: 'clarify',
+  trap: 'example',     // une reformulation fausse "à la manière d'un exemple"
+  conclude: 'followup'
+};
+
+// ---------------------------------------------------------------------------
+// Estimation de compréhension (locale, alimentée par les signaux du graphe)
+// ---------------------------------------------------------------------------
+
 /** Estime un niveau de compréhension (0-100) à partir de la session. */
 function estimateComprehension(topic, session) {
+  // Base : couverture textuelle (conservée pour rétro-compatibilité)
   const covered = session.conceptsCovered.length;
-  const total = topic.concepts.length;
-  const coverageScore = (covered / total) * 70;
+  const total = topic.concepts.length || 1;
+  const coverageScore = (covered / total) * 60;
 
-  // Bonus : qualité des explications (longueur moyenne, présence d'exemples)
+  // Bonus issu du student_model du graphe (si présent)
+  let modelBonus = 0;
+  const model = Array.isArray(session.studentModel) ? session.studentModel : [];
+  if (model.length > 0) {
+    const clearCount = model.filter((n) => n.status === 'clear').length;
+    const vagueCount = model.filter((n) => n.status === 'vague').length;
+    const contradicted = model.filter((n) => n.status === 'contradicted').length;
+    modelBonus = (clearCount / model.length) * 30 - (vagueCount * 2) - (contradicted * 5);
+  }
+
+  // Bonus longueur/exemples (signal "qualité d'explication")
   const userMessages = session.messages.filter((m) => m.role === 'user');
   const avgLen = userMessages.length
     ? userMessages.reduce((acc, m) => acc + m.content.length, 0) / userMessages.length
     : 0;
-  const lengthBonus = Math.min(15, avgLen / 30);
-
+  const lengthBonus = Math.min(10, avgLen / 40);
   const hasExample = userMessages.some((m) => /exemple|par exemple|imagine|comme/i.test(m.content));
-  const exampleBonus = hasExample ? 10 : 0;
+  const exampleBonus = hasExample ? 5 : 0;
 
-  const turnPenalty = session.confusionCount * 5;
+  // Pénalité globale (confusion locale + confusion remontée par le graphe)
+  const confusionPenalty = (session.confusionCount || 0) * 4
+    + Math.min(20, (session.overallConfusion || 0) / 4);
 
-  const score = Math.max(0, Math.min(100, Math.round(coverageScore + lengthBonus + exampleBonus - turnPenalty)));
-  return score;
+  const raw = coverageScore + modelBonus + lengthBonus + exampleBonus - confusionPenalty;
+  return Math.max(0, Math.min(100, Math.round(raw)));
 }
 
-/** Choisit le prochain message de l'IA élève en fonction du contexte. */
-function buildStudentReply(topic, session, lastUserMessage) {
-  const text = lastUserMessage.content.trim();
-  const normalizedText = normalize(text);
-  const remaining = topic.concepts.filter((c) => !session.conceptsCovered.includes(c));
+// ---------------------------------------------------------------------------
+// API publique
+// ---------------------------------------------------------------------------
 
-  // Cas 1 : message très court -> demande de développer
-  if (text.length < 25) {
-    session.confusionCount += 1;
+/**
+ * Choisit le prochain message de l'IA élève en fonction du contexte.
+ * Délègue au microservice Python via /invoke. Fallback gracieux si KO.
+ */
+function buildStudentReply(topic, session, lastUserMessage) {
+  // Initialiser le student_model si on entre dans la session
+  if (!Array.isArray(session.studentModel) || session.studentModel.length === 0) {
+    session.studentModel = buildInitialStudentModel(topic);
+  }
+
+  // Préparer la charge utile attendue par le microservice
+  const payload = {
+    concept: topic.label,
+    history: session.messages.map((m) => ({ role: m.role, content: m.content })),
+    student_model: session.studentModel,
+    last_user_message: lastUserMessage.content
+  };
+
+  try {
+    const data = postJsonSync('/invoke', payload);
+
+    // Mettre à jour les champs additionnels de la session (sans casser l'existant)
+    if (Array.isArray(data.student_model) && data.student_model.length > 0) {
+      session.studentModel = data.student_model;
+    }
+    session.overallConfusion = typeof data.overall_confusion === 'number'
+      ? data.overall_confusion
+      : (session.overallConfusion || 0);
+    session.lastMove = data.move;
+    session.lastTargetedNode = data.targeted_node;
+
+    const move = data.move || 'deepen';
+    const type = MOVE_TO_TYPE[move] || 'clarify';
+
+    return {
+      type,
+      content: data.reaction || '…'
+    };
+  } catch (err) {
+    // --- Fallback gracieux : le micro-service est injoignable ---
+    session.confusionCount = (session.confusionCount || 0) + 1;
     return {
       type: 'clarify',
-      content: "Hmm, je n'ai pas vraiment saisi. Tu peux développer un peu plus ? Quelques phrases me suffiraient pour visualiser ce que tu décris."
+      content:
+        "Léo est momentanément absent (le micro-service pédagogique ne répond pas). "
+        + "Reformule ta dernière idée et je transmettrai dès qu'il revient."
     };
-  }
-
-  // Cas 2 : l'utilisateur a couvert un nouveau concept -> rebondir dessus
-  const newlyCovered = detectConceptsCovered(topic, text, session.conceptsCovered);
-  if (newlyCovered.length > 0) {
-    const focus = newlyCovered[0];
-    return {
-      type: 'followup',
-      content: `D'accord, je note la notion de « ${focus} ». Tu peux me dire pourquoi c'est important ici, et comment ça s'articule avec ce qu'on a déjà vu ?`,
-      newlyCovered
-    };
-  }
-
-  // Cas 3 : un concept clé n'est pas encore couvert -> poser une question dessus
-  if (remaining.length > 0 && session.messages.length % 3 === 0) {
-    const target = remaining[0];
-    return {
-      type: 'probe',
-      content: `Et est-ce qu'on devrait parler de « ${target} » ? J'ai l'impression que c'est un morceau qui me manque pour vraiment comprendre.`
-    };
-  }
-
-  // Cas 4 : alterner entre demande d'exemple et question de clarification
-  const turn = session.messages.filter((m) => m.role === 'assistant').length;
-  if (turn % 2 === 0) {
-    const q = topic.clarifyingQuestions[turn % topic.clarifyingQuestions.length];
-    return { type: 'clarify', content: q };
-  } else {
-    const q = topic.exampleRequests[turn % topic.exampleRequests.length];
-    return { type: 'example', content: q };
   }
 }
 
-/** Génère le rapport final synthétisant la session. */
+/**
+ * Génère le rapport final synthétisant la session.
+ * Délègue au microservice Python via /report ; produit malgré tout un rapport
+ * dans la forme attendue par le front si le service est KO.
+ */
 function buildFinalReport(topic, session) {
+  // Initialisation défensive
+  if (!Array.isArray(session.studentModel) || session.studentModel.length === 0) {
+    session.studentModel = buildInitialStudentModel(topic);
+  }
+
+  let verdict = null;
+  try {
+    const payload = {
+      concept: topic.label,
+      history: session.messages.map((m) => ({ role: m.role, content: m.content })),
+      student_model: session.studentModel
+    };
+    const data = postJsonSync('/report', payload);
+    verdict = data && data.verdict ? data.verdict : null;
+  } catch (err) {
+    verdict = null; // on retombe sur le fallback ci-dessous
+  }
+
+  // --- Construction du rapport au format attendu par api/sessions.js ---
   const covered = session.conceptsCovered;
   const missing = topic.concepts.filter((c) => !covered.includes(c));
-
   const userMessages = session.messages.filter((m) => m.role === 'user');
   const hasExamples = userMessages.some((m) => /exemple|imagine|comme/i.test(m.content));
-  const shortAnswers = userMessages.filter((m) => m.content.length < 40).length;
+  const score = estimateComprehension(topic, session);
 
-  const mastered = covered.map((c) => ({
+  // Maîtrise : on combine les concepts détectés localement + nœuds "clear" du graphe
+  const modelClears = (session.studentModel || [])
+    .filter((n) => n.status === 'clear')
+    .map((n) => ({ concept: n.label, note: n.note || `Concept « ${n.label} » bien expliqué.` }));
+  const masteredFromCovered = covered.map((c) => ({
     concept: c,
     note: `Vous avez explicitement abordé « ${c} » dans vos explications.`
   }));
+  const mastered = [...masteredFromCovered, ...modelClears];
 
+  // Incertitudes : on s'appuie d'abord sur le verdict du graphe s'il existe
   const uncertainties = [];
-  if (shortAnswers > 1) {
-    uncertainties.push("Plusieurs explications étaient très courtes — un signe que la maîtrise reste superficielle.");
-  }
-  if (!hasExamples) {
-    uncertainties.push("Aucun exemple concret n'a été donné : difficile de vérifier la compréhension opérationnelle.");
-  }
-  if (session.confusionCount > 0) {
-    uncertainties.push(`L'IA élève a manifesté de la confusion à ${session.confusionCount} reprise(s).`);
+  if (verdict && Array.isArray(verdict.gaps) && verdict.gaps.length > 0) {
+    for (const g of verdict.gaps) {
+      uncertainties.push(g.why || `Le point « ${g.node} » n'a pas été clarifié.`);
+    }
+  } else {
+    if (userMessages.filter((m) => m.content.length < 40).length > 1) {
+      uncertainties.push("Plusieurs explications étaient très courtes — un signe que la maîtrise reste superficielle.");
+    }
+    if (!hasExamples) {
+      uncertainties.push("Aucun exemple concret n'a été donné : difficile de vérifier la compréhension opérationnelle.");
+    }
+    if ((session.confusionCount || 0) > 0) {
+      uncertainties.push(`Léo a manifesté de la confusion à ${session.confusionCount} reprise(s).`);
+    }
   }
 
-  const misexplained = missing.slice(0, 3).map((c) => ({
-    concept: c,
-    note: `La notion « ${c} » n'a pas été abordée ou pas suffisamment développée.`
-  }));
+  // Mal-expliqués : nœuds "vague" / "contradicted" remontés par le graphe, sinon manquants
+  const misexplained = [];
+  for (const n of (session.studentModel || [])) {
+    if (n.status === 'vague' || n.status === 'contradicted') {
+      misexplained.push({
+        concept: n.label,
+        note: n.note || `La notion « ${n.label} » est restée floue (${n.status}).`
+      });
+    }
+  }
+  if (misexplained.length === 0) {
+    for (const c of missing.slice(0, 3)) {
+      misexplained.push({
+        concept: c,
+        note: `La notion « ${c} » n'a pas été abordée ou pas suffisamment développée.`
+      });
+    }
+  }
 
+  // Recommandations
   const recommendations = [];
   if (missing.length > 0) {
     recommendations.push(`Reprendre les notions manquantes : ${missing.join(', ')}.`);
@@ -138,14 +298,15 @@ function buildFinalReport(topic, session) {
   if (!hasExamples) {
     recommendations.push("S'entraîner à formuler au moins un exemple concret par concept.");
   }
-  if (session.confusionCount > 0) {
+  if ((session.confusionCount || 0) > 0) {
     recommendations.push("Reformuler avec un vocabulaire plus simple les passages qui ont déclenché la confusion.");
+  }
+  if (verdict && verdict.summary) {
+    recommendations.push(`Synthèse de Léo : ${verdict.summary}`);
   }
   if (recommendations.length === 0) {
     recommendations.push("Très bonne couverture. Pour aller plus loin, essayer d'enseigner le sujet à quelqu'un sans préparation.");
   }
-
-  const score = estimateComprehension(topic, session);
 
   return {
     topic: topic.label,
